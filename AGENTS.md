@@ -25,6 +25,11 @@ roadmap (odor -> brain -> decoder -> LLM).
   writes `results_odor/` (spike rasters, `states.npy`, `summary.json`).
 - Inspect those results: `.\.venv\Scripts\python.exe analyze_odors.py`
   (top glomeruli per odor, population firing-rate bins).
+- Build the decoder dataset (stage 4.1):
+  `.\.venv\Scripts\python.exe build_odor_dataset.py --n-odors 36 --trials 20
+  --drive-sigma 0.15` — repeated trials with stimulus jitter for many odors,
+  writes `decoder/dataset.npz` (X_counts / X_bins / X_glom / X_glom_bins),
+  `decoder/odor_names.json`, `decoder/meta.json`. Takes ~6 min.
 
 ## Hard constraints (do not break)
 
@@ -52,6 +57,7 @@ roadmap (odor -> brain -> decoder -> LLM).
   (built once by `prepare_olfaction.py`), not re-derived from scratch.
 - `flynet.log` and `flynet_result.json` are generated artifacts, not sources.
 - `results_odor/` is a generated stage-3 artifact (spike rasters + states).
+- `decoder/` is a generated stage-4 artifact (dataset.npz + metadata).
 
 ## Model (flynet.py / run_odors.py) summary
 

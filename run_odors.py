@@ -54,6 +54,40 @@ def build_network(n_neurons, i_arr, j_arr, w_syn):
     return G, S, sm, Rres, El
 
 
+def build_subgraph(feather, n_top_al, orn_ids):
+    """Top-K AL presynaptic neurons + all ORNs; returns edge arrays."""
+    t = ft.read_table(feather)
+    pre = t.column("pre_pt_root_id").to_numpy()
+    post = t.column("post_pt_root_id").to_numpy()
+    npl = t.column("neuropil").to_pylist()
+    syn_c = t.column("syn_count").to_numpy().astype(np.float64)
+    gaba = t.column("gaba_avg").to_numpy()
+    glut = t.column("glut_avg").to_numpy()
+
+    in_al = np.array([isinstance(x, str) and x.startswith("AL") for x in npl])
+    pre_a = pre[in_al]
+    uniq, counts = np.unique(pre_a, return_counts=True)
+    top = uniq[np.argsort(-counts)[: n_top_al]]
+    chosen = np.unique(np.concatenate([top, orn_ids]))
+    cset = set(chosen.tolist())
+    print(f"chosen neurons: {len(chosen)} "
+          f"(ORNs among them: {len(cset & set(orn_ids.tolist()))})")
+
+    keep = np.isin(pre, list(cset)) & np.isin(post, list(cset))
+    pre_k, post_k = pre[keep], post[keep]
+    id2i = {nid: i for i, nid in enumerate(chosen)}
+    i_arr = np.array([id2i[a] for a in pre_k], dtype=np.int64)
+    j_arr = np.array([id2i[b] for b in post_k], dtype=np.int64)
+    syn_k = syn_c[keep]
+    inhibitory = gaba[keep] > glut[keep]
+    w_syn = np.where(inhibitory, -1.0, 1.0) * np.maximum(0.1, syn_k)
+    print(f"synapses in subgraph: {len(i_arr)} "
+          f"(E: {int((~inhibitory).sum())}, I: {int(inhibitory.sum())})")
+    orn_set = set(orn_ids.tolist())
+    is_orn = np.array([n in orn_set for n in chosen], dtype=bool)
+    return chosen, i_arr, j_arr, w_syn, is_orn
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--feather", default="proofread_connections_783.feather")
@@ -77,36 +111,8 @@ def main():
     print(f"ORNs: {len(orn_ids)}, odors in matrix: {matrix.shape[1]}")
 
     # ---- subgraph: top-K presynaptic in AL + all ORNs ------------------------
-    t = ft.read_table(args.feather)
-    pre = t.column("pre_pt_root_id").to_numpy()
-    post = t.column("post_pt_root_id").to_numpy()
-    npl = t.column("neuropil").to_pylist()
-    syn_c = t.column("syn_count").to_numpy().astype(np.float64)
-    gaba = t.column("gaba_avg").to_numpy()
-    glut = t.column("glut_avg").to_numpy()
-
-    in_al = np.array([isinstance(x, str) and x.startswith("AL") for x in npl])
-    pre_a, post_a = pre[in_al], post[in_al]
-    uniq, counts = np.unique(pre_a, return_counts=True)
-    top = uniq[np.argsort(-counts)[: args.neurons]]
-    chosen = np.unique(np.concatenate([top, orn_ids]))
-    cset = set(chosen.tolist())
-    print(f"chosen neurons: {len(chosen)} "
-          f"(ORNs among them: {len(cset & set(orn_ids.tolist()))})")
-
-    cset_list = list(cset)
-    keep = np.isin(pre, cset_list) & np.isin(post, cset_list)
-    pre_k, post_k = pre[keep], post[keep]
-    id2i = {nid: i for i, nid in enumerate(chosen)}
-    i_arr = np.array([id2i[a] for a in pre_k], dtype=np.int64)
-    j_arr = np.array([id2i[b] for b in post_k], dtype=np.int64)
-    syn_k = syn_c[keep]
-    inhibitory = gaba[keep] > glut[keep]
-    w_syn = np.where(inhibitory, -1.0, 1.0) * np.maximum(0.1, syn_k)
-    print(f"synapses in subgraph: {len(i_arr)} "
-          f"(E: {int((~inhibitory).sum())}, I: {int(inhibitory.sum())})")
-
-    is_orn = np.array([n in orn_tab_idx for n in chosen], dtype=bool)
+    chosen, i_arr, j_arr, w_syn, is_orn = build_subgraph(
+        args.feather, args.neurons, orn_ids)
 
     # ---- odor list -----------------------------------------------------------
     odor_names = [s.strip() for s in args.odors.split(",") if s.strip()]
