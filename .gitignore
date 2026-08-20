@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Large input data (852 MB connectome — read-only external)
+*.feather
+
+# Downloadable annotation table (31 MB, from flyconnectome/flywire_annotations)
+flywire_neuron_annotations.tsv
+
+# Generated artifacts
+flynet.log
+flynet_result.json
+olfactory/
+results_odor/
