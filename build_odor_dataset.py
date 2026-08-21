@@ -121,12 +121,15 @@ def simulate_trial(drive_amp, args, N, is_orn, i_arr, j_arr, w_syn):
     flat = bind * N + iw
     bins = np.bincount(flat, minlength=B * N).astype(np.float32).reshape(B, N)
 
-    # ---- full-window temporal trajectory (lever 2) ---------------------------
-    TB = args.traj_bins
-    edges = np.linspace(0.0, args.simtime, TB + 1)
-    tb = np.clip(np.searchsorted(edges, t_all, side="right") - 1, 0, TB - 1)
-    traj = np.bincount(tb * N + i_all, minlength=TB * N).astype(np.float32) \
-        .reshape(TB, N)
+    # ---- full-window temporal trajectory (lever 2); skipped if traj_bins<=0 -
+    if args.traj_bins and args.traj_bins > 0:
+        TB = args.traj_bins
+        edges = np.linspace(0.0, args.simtime, TB + 1)
+        tb = np.clip(np.searchsorted(edges, t_all, side="right") - 1, 0, TB - 1)
+        traj = np.bincount(tb * N + i_all, minlength=TB * N).astype(np.float32) \
+            .reshape(TB, N)
+    else:
+        traj = None
     return counts, bins, traj
 
 
@@ -264,19 +267,20 @@ def main():
             trials_meta.append({"kind": kind, "odor_index": int(oi)})
     X_counts = np.array(X_counts, dtype=np.float32)
     X_bins = np.array(X_bins, dtype=np.float32)
-    X_traj = np.array(X_traj, dtype=np.float32)
+    y = np.array(y, dtype=np.int64)
     X_glom = X_counts @ onehot
     X_glom_bins = X_bins @ onehot
-    X_glom_traj = X_traj @ onehot
-    y = np.array(y, dtype=np.int64)
 
     os.makedirs(args.outdir, exist_ok=True)
-    np.savez(os.path.join(args.outdir, "dataset.npz"),
-             X_counts=X_counts, X_bins=X_bins, X_traj=X_traj,
-             X_glom=X_glom, X_glom_bins=X_glom_bins,
-             X_glom_traj=X_glom_traj, y=y,
-             root_ids=chosen.astype(np.int64), is_orn=is_orn,
-             group_ids=group_ids)
+    save_kwargs = dict(X_counts=X_counts, X_bins=X_bins,
+                       X_glom=X_glom, X_glom_bins=X_glom_bins, y=y,
+                       root_ids=chosen.astype(np.int64), is_orn=is_orn,
+                       group_ids=group_ids)
+    if X_traj[0] is not None:
+        X_traj = np.array(X_traj, dtype=np.float32)
+        save_kwargs["X_traj"] = X_traj
+        save_kwargs["X_glom_traj"] = X_traj @ onehot
+    np.savez(os.path.join(args.outdir, "dataset.npz"), **save_kwargs)
     with open(os.path.join(args.outdir, "odor_names.json"), "w") as f:
         json.dump([names[i] for i in odor_idx] + ["__blank__"], f)
     pd_meta = {

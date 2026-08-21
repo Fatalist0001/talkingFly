@@ -107,22 +107,8 @@ def train_relational(Z, y, train_idx, odor_idx, matrix, E=64, lr=0.3,
     K = Z.shape[1]
     W = (rng.standard_normal((K, E)) * 0.01).astype(np.float32)
     # target DoOR correlation among training (seen) odors
-    seen = np.unique(y[train_idx])
-    corr = np.zeros((len(seen), len(seen)))
-    for a, la in enumerate(seen):
-        for b, lb in enumerate(seen):
-            ca = np.nan_to_num(matrix[:, odor_idx[la]])
-            cb = np.nan_to_num(matrix[:, odor_idx[lb]])
-            if ca.std() == 0 or cb.std() == 0:
-                corr[a, b] = 0.0
-            else:
-                corr[a, b] = np.corrcoef(ca, cb)[0, 1]
-    pos = {l: i for i, l in enumerate(seen)}
-    m = len(train_idx)
-    T = np.zeros((m, m))
-    for i in range(m):
-        for j in range(m):
-            T[i, j] = corr[pos[y[train_idx[i]]], pos[y[train_idx[j]]]]
+    oi, corr = _odor_corr(y, train_idx, odor_idx, matrix)
+    T = corr[np.ix_(oi, oi)]
     for ep in range(epochs):
         h = Z[train_idx] @ W
         nrm = np.maximum(np.linalg.norm(h, axis=1, keepdims=True), 1e-9)
@@ -137,6 +123,88 @@ def train_relational(Z, y, train_idx, odor_idx, matrix, E=64, lr=0.3,
         W = W - lr * (Z[train_idx].T @ grad_h)
         if ep % 100 == 0 or ep == epochs - 1:
             print(f"    epoch {ep:3d}  relational MSE = {loss:.4f}")
+    return W
+
+
+def _odor_corr(y, train_idx, odor_idx, matrix):
+    """Pearson corr of DoOR vectors among the seen odors, expanded to trial pairs.
+
+    Returns (oi, corr_SxS): oi = odor-position per training trial, corr_SxS the
+    (n_seen x n_seen) correlation matrix. Trial-pair matrix is corr_SxS[ix_(oi,oi)].
+    Vectorised over odors (not trials) so it scales to thousands of trials.
+    """
+    seen = np.unique(y[train_idx])
+    pos = {l: i for i, l in enumerate(seen)}
+    D = np.nan_to_num(matrix[:, [odor_idx[l] for l in seen]])   # (78, n_seen)
+    Dc = D - D.mean(axis=0, keepdims=True)
+    Dn = Dc / np.maximum(np.linalg.norm(Dc, axis=0, keepdims=True), 1e-9)
+    corr = Dn.T @ Dn
+    oi = np.array([pos[o] for o in y[train_idx]])
+    return oi, corr
+
+
+def train_rank(Z, y, train_idx, odor_idx, matrix, E=64, lr=0.3, epochs=300,
+               seed=0, temp_s=0.2, tau=0.1):
+    """Soft (supervised) contrastive: preserve DoOR *similarity ranking*.
+
+    Anchor trial's target over other trials is a softmax over DoOR correlations,
+    not a hard "same odor vs different". Pulls chemically-similar odors together
+    more strongly than dissimilar ones (a sharper metric than the relational MSE).
+    """
+    rng = np.random.default_rng(seed)
+    K = Z.shape[1]
+    W = (rng.standard_normal((K, E)) * 0.01).astype(np.float32)
+    oi, corr = _odor_corr(y, train_idx, odor_idx, matrix)
+    C = corr[np.ix_(oi, oi)]
+    Cs = C / temp_s
+    Cs = Cs - Cs.max(axis=1, keepdims=True)
+    e = np.exp(Cs)
+    S = e / e.sum(axis=1, keepdims=True)          # soft targets
+    for ep in range(epochs):
+        h = Z[train_idx] @ W
+        nrm = np.maximum(np.linalg.norm(h, axis=1, keepdims=True), 1e-9)
+        z = h / nrm
+        sim = z @ z.T
+        ls = sim / tau
+        ls = ls - ls.max(axis=1, keepdims=True)
+        ep_ = np.exp(ls)
+        P = ep_ / ep_.sum(axis=1, keepdims=True)
+        loss = float(np.mean(-np.sum(S * np.log(P + 1e-12), axis=1)))
+        G = (P - S) / tau
+        Sv = (G + G.T) @ z
+        ps = np.sum(z * Sv, axis=1, keepdims=True)
+        grad_h = (Sv - z * ps) / nrm
+        W = W - lr * (Z[train_idx].T @ grad_h)
+        if ep % 50 == 0 or ep == epochs - 1:
+            print(f"    epoch {ep:3d}  rank KL = {loss:.4f}")
+    return W
+
+
+def train_reg78(Z, y, train_idx, odor_idx, matrix, E=78, lr=0.1, epochs=400,
+                seed=0):
+    """Linear map brain PCA -> full 78-receptor DoOR vector (per trial's odor).
+
+    Embedding = predicted DoOR vector; retrieval then directly tests whether the
+    brain state recovers enough chemical identity to land near its true neighbor.
+    """
+    rng = np.random.default_rng(seed)
+    K = Z.shape[1]
+    W = (rng.standard_normal((K, E)) * 0.01).astype(np.float32)
+    m = len(train_idx)
+    T = np.zeros((m, matrix.shape[0]))
+    for i in range(m):
+        T[i] = np.nan_to_num(matrix[:, odor_idx[y[train_idx[i]]]])
+    T = T / np.maximum(np.linalg.norm(T, axis=1, keepdims=True), 1e-9)
+    for ep in range(epochs):
+        h = Z[train_idx] @ W
+        nrm = np.maximum(np.linalg.norm(h, axis=1, keepdims=True), 1e-9)
+        pred = h / nrm
+        loss = float(np.mean((pred - T) ** 2))
+        grad_pred = 2.0 * (pred - T)
+        grad_h = (grad_pred - pred * np.sum(pred * grad_pred, axis=1, keepdims=True)) / nrm
+        W = W - lr * (Z[train_idx].T @ grad_h)
+        if ep % 100 == 0 or ep == epochs - 1:
+            print(f"    epoch {ep:3d}  reg78 MSE = {loss:.4f}")
     return W
 
 
@@ -170,50 +238,61 @@ def eval_generalisation(emb, y, held_labels, seen_labels, gt_rank, k_list):
     return out
 
 
+def expand_features(feats, n, seed):
+    """Fixed random expansion (ReLU) — a cheap proxy for MB expansion recoding.
+
+    Maps the compressed AL state into a high-dimensional sparse space; if this
+    lifts held-out retrieval above chance, a real mushroom-body layer is warranted.
+    """
+    rng = np.random.default_rng(seed)
+    D = feats.shape[1]
+    R = rng.standard_normal((D, n)).astype(np.float32)
+    return np.maximum(feats @ R, 0.0).astype(np.float32)
+
+
 def run_feature(name, feats, y, held_labels, seen_labels, gt_rank, args,
                 matrix, odor_idx):
     print(f"\n=== feature: {name} ===")
+    if args.expand and args.expand > 0:
+        feats = expand_features(feats, args.expand, args.seed)
     train_mask = np.isin(y, seen_labels)
     Z, _ = pca_feats(feats, train_mask, k=args.pca)
-    # raw PCA baseline
-    raw_emb = Z / np.linalg.norm(Z, axis=1, keepdims=True)
-    raw_res = eval_generalisation(raw_emb, y, held_labels, seen_labels,
-                                  gt_rank, args.k)
-    print(f"  RAW PCA     held-out: " +
-          "  ".join(f"hit@{k}={raw_res[k]:.2f}" for k in args.k) +
-          f"  mean_rank={raw_res['mean_rank']:.1f} "
-          f"(chance@1={raw_res['chance@1']:.3f})")
-    # contrastive (plain: all-different-odors equally negative)
     train_idx = np.where(train_mask)[0]
-    W = train_contrastive(Z, y, train_idx, E=args.emb, tau=args.tau,
-                          lr=args.lr, epochs=args.epochs, seed=args.seed)
-    c_emb = embed(Z, W)
-    c_res = eval_generalisation(c_emb, y, held_labels, seen_labels,
-                                gt_rank, args.k)
-    print(f"  CONTRASTIVE held-out: " +
-          "  ".join(f"hit@{k}={c_res[k]:.2f}" for k in args.k) +
-          f"  mean_rank={c_res['mean_rank']:.1f} "
-          f"(chance@1={c_res['chance@1']:.3f})")
-    # relational (similarity-aware: inner product == DoOR correlation)
+
+    embs = {}
+    embs["RAW_PCA"] = Z / np.maximum(np.linalg.norm(Z, axis=1, keepdims=True), 1e-9)
+    Wc = train_contrastive(Z, y, train_idx, E=args.emb, tau=args.tau,
+                           lr=args.lr, epochs=args.epochs, seed=args.seed)
+    embs["CONTRASTIVE"] = embed(Z, Wc)
     Wr = train_relational(Z, y, train_idx, odor_idx, matrix, E=args.emb,
                           lr=args.lr, epochs=args.epochs, seed=args.seed)
-    r_emb = embed(Z, Wr)
-    r_res = eval_generalisation(r_emb, y, held_labels, seen_labels,
-                                gt_rank, args.k)
-    print(f"  RELATIONAL   held-out: " +
-          "  ".join(f"hit@{k}={r_res[k]:.2f}" for k in args.k) +
-          f"  mean_rank={r_res['mean_rank']:.1f} "
-          f"(chance@1={r_res['chance@1']:.3f})")
-    # closed-set sanity (seen odors, 1-NN in embedding)
+    embs["RELATIONAL"] = embed(Z, Wr)
+    Wk = train_rank(Z, y, train_idx, odor_idx, matrix, E=args.emb,
+                    lr=args.lr, epochs=args.epochs, seed=args.seed,
+                    temp_s=args.temp_s, tau=args.tau)
+    embs["RANK"] = embed(Z, Wk)
+    Wg = train_reg78(Z, y, train_idx, odor_idx, matrix, E=matrix.shape[0],
+                     lr=args.lr, epochs=args.epochs, seed=args.seed)
+    embs["REG78"] = embed(Z, Wg)
+
+    out = {}
+    for tag, emb in embs.items():
+        res = eval_generalisation(emb, y, held_labels, seen_labels, gt_rank,
+                                  args.k)
+        out[tag] = res
+        print(f"  {tag:12s} held-out: " +
+              "  ".join(f"hit@{kk}={res[kk]:.2f}" for kk in args.k) +
+              f"  mean_rank={res['mean_rank']:.1f} "
+              f"(chance@1={res['chance@1']:.3f})")
     seen_trial = np.concatenate([np.where(y == l)[0] for l in seen_labels])
-    for tag, emb in (("contrastive", c_emb), ("relational", r_emb)):
+    for tag, emb in embs.items():
         cents = {l: emb[y == l].mean(0) for l in seen_labels}
         closed = [max(cents, key=lambda l: emb[st] @ cents[l])
                   for st in seen_trial]
         acc = float(np.mean([closed[i] == y[seen_trial][i]
                              for i in range(len(seen_trial))]))
-        print(f"  closed-set 1-NN acc ({tag}, {len(seen_labels)} odors): {acc:.3f}")
-    return {"raw": raw_res, "contrastive": c_res, "relational": r_res}
+        print(f"  {tag:12s} closed-set 1-NN acc ({len(seen_labels)}): {acc:.3f}")
+    return out
 
 
 def main():
@@ -226,21 +305,34 @@ def main():
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--k", type=int, nargs="+", default=[1, 3, 5])
+    p.add_argument("--held-every", type=int, default=4,
+                   help="hold out every Nth odor (N=4 -> 1/4 unseen)")
+    p.add_argument("--temp-s", type=float, default=0.2,
+                   help="soft-target temperature for the ranking loss")
+    p.add_argument("--expand", type=int, default=0,
+                   help="random ReLU expansion dim (MB expansion-recoding proxy)")
+    p.add_argument("--orn-only", action="store_true",
+                   help="decode from ORN spikes only (input layer, most identity)")
     p.add_argument("--out", default="decoder/contrast.json")
     args = p.parse_args()
 
     d = np.load(args.data)
     y = d["y"]
     X_counts = d["X_counts"].astype(float)
-    X_traj = d["X_traj"].astype(float).reshape(len(y), -1)
-    names = json.load(open("decoder/odor_names.json"))
+    is_orn = d["is_orn"].astype(bool)
+    if args.orn_only:
+        X_counts = X_counts[:, is_orn]
+    X_traj = (d["X_traj"].astype(float).reshape(len(y), -1)
+              if "X_traj" in d.files else None)
+    data_dir = os.path.dirname(args.data) or "."
+    names = json.load(open(os.path.join(data_dir, "odor_names.json")))
     n_odor = len(names) - 1
 
     _, matrix, door_names = op.load()
     odor_idx = [door_names.index(n) for n in names[:n_odor]]
 
-    # held-out split: every 4th odor (9 held, 27 seen)
-    held_labels = list(range(0, n_odor, 4))
+    # held-out split: every Nth odor
+    held_labels = list(range(0, n_odor, args.held_every))
     seen_labels = [l for l in range(n_odor) if l not in held_labels]
     gt_rank = doorgt(held_labels, seen_labels, matrix, names, odor_idx)
     print(f"held-out odors ({len(held_labels)}): "
@@ -248,10 +340,13 @@ def main():
 
     results = {}
     results["counts"] = run_feature("X_counts", X_counts, y, held_labels,
-                                    seen_labels, gt_rank, args, matrix,
-                                    odor_idx)
-    results["traj"] = run_feature("X_traj", X_traj, y, held_labels,
-                                  seen_labels, gt_rank, args, matrix, odor_idx)
+                                    seen_labels, gt_rank, args, matrix, odor_idx)
+    if X_traj is not None:
+        results["traj"] = run_feature("X_traj", X_traj, y, held_labels,
+                                      seen_labels, gt_rank, args, matrix,
+                                      odor_idx)
+    else:
+        print("\n=== feature: X_traj ===\n  (not present in dataset, skipped)")
 
     with open(args.out, "w") as f:
         json.dump(results, f, indent=2)
