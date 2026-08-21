@@ -41,6 +41,9 @@ roadmap (odor -> brain -> decoder -> LLM).
   regression for unseen odors, `decoder/open.json`). scikit-learn is installed.
   NOTE: `decoder/dataset.npz` is currently generated at gain=40 (stronger drive;
   min odor-state corr 0.78 vs 0.92 at gain=5) for better separability.
+  ORN drive time course is selectable via `--pulse tonic|bump|adapt` (timed
+  TimedArray in run_odors.build_network; default tonic). Pulse drive was tried
+  for stage 4.8 and did NOT improve held-out — see PLAN.md.
 - Contrastive / relational metric learning (stage 4.7):
   `.\.venv\Scripts\python.exe decoder_contrast.py` — PCA features + InfoNCE
   (plain) and relational (inner-product == DoOR similarity) encoders; evaluates

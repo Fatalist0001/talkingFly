@@ -53,29 +53,58 @@ def _chunkify(specs, n):
     return [specs[i:i + k] for i in range(0, len(specs), k)]
 
 
+DT_MS = 0.1
+
+
+def make_env(t, args):
+    """Time envelope of the ORN drive over the full simulation.
+
+    Returns (n_steps,) in [0,1]; 0 outside the stimulus window. The ORN drive at
+    time t is base + amp_i * env(t), so a non-tonic envelope creates onset/offset
+    transients whose downstream (AL) dynamics differ between odors.
+    """
+    stim_on, stim_off = args.stim_start, args.stim_start + args.stim_dur
+    env = np.zeros_like(t)
+    inside = (t >= stim_on) & (t < stim_off)
+    tt = (t[inside] - stim_on) / args.stim_dur           # 0..1 within stim
+    if args.pulse == "tonic":
+        env[inside] = 1.0
+    elif args.pulse == "bump":
+        env[inside] = 0.5 * (1.0 - np.cos(2.0 * np.pi * tt))
+    elif args.pulse == "adapt":
+        # fast onset, decay to a sustained floor -> onset transient + tonic tail
+        rise = 1.0 - np.exp(-tt / 0.08)
+        decay = 0.5 + 0.5 * np.exp(-tt / 0.45)
+        e = rise * decay
+        e = e / e.max()
+        env[inside] = e
+    else:
+        raise ValueError(f"unknown --pulse {args.pulse}")
+    return env
+
+
 def _run_chunk(specs):
     out = []
-    for (label, kind, oi, drive_orn) in specs:
+    for (label, kind, oi, drive_amp) in specs:
         counts, bins, traj = simulate_trial(
-            drive_orn, _ARGS, _N, _IS_ORN, _I_ARR, _J_ARR, _W_SYN)
+            drive_amp, _ARGS, _N, _IS_ORN, _I_ARR, _J_ARR, _W_SYN)
         out.append((counts, bins, traj, label, kind, oi))
     return out
 
 
-def simulate_trial(drive_orn, args, N, is_orn, i_arr, j_arr, w_syn):
-    """Simulate one trial. drive_orn: (N,) pA drive (non-ORN set to 0)."""
-    G, S, sm, Rres, El = build_network(N, i_arr, j_arr, w_syn)
+def simulate_trial(drive_amp, args, N, is_orn, i_arr, j_arr, w_syn):
+    """Simulate one trial. drive_amp: (N,) pulse amplitude per ORN (pA), 0 else."""
+    G, S, sm, Rres, El = build_network(N, i_arr, j_arr, w_syn, timed=True)
     G.v = El + args.base * pA * Rres
-    G.I_drive[:] = args.base * pA
-    G.I_drive[~is_orn] = 0 * amp
-    run(args.stim_start * ms)
-    d = np.zeros(N)
-    d[is_orn] = np.clip(drive_orn[is_orn], 0.0, None)
-    G.I_drive[:] = d * pA
-    run(args.stim_dur * ms)
-    G.I_drive[:] = args.base * pA
-    G.I_drive[~is_orn] = 0 * amp
-    run((args.simtime - args.stim_start - args.stim_dur) * ms)
+
+    n_steps = int(round(args.simtime / DT_MS))
+    t = np.arange(n_steps) * DT_MS
+    env = make_env(t, args)                             # (n_steps,)
+    drive_mat = np.zeros((n_steps, N), dtype=np.float32)
+    amp = np.clip(drive_amp, 0.0, None)
+    drive_mat[:, is_orn] = (args.base + amp[is_orn][None, :] * env[:, None]).astype(np.float32)
+    G.namespace["drive_ta"] = TimedArray(drive_mat * pA, dt=DT_MS * ms)
+    run(args.simtime * ms)
 
     t_all = sm.t[:] / ms
     i_all = sm.i[:]
@@ -146,8 +175,11 @@ def main():
     p.add_argument("--nbins", type=int, default=7, help="PSTH bins in window")
     p.add_argument("--traj-bins", type=int, default=30,
                    help="full-window PSTH bins (temporal trajectory feature)")
-    p.add_argument("--base", type=float, default=1.0, help="pA tonic ORN drive")
+    p.add_argument("--base", type=float, default=1.0, help="pA tonic ORN floor")
     p.add_argument("--gain", type=float, default=5.0, help="pA per resp unit")
+    p.add_argument("--pulse", default="tonic",
+                   choices=["tonic", "bump", "adapt"],
+                   help="ORN drive time course (adapt=onset transient+tail)")
     p.add_argument("--drive-sigma", type=float, default=0.15,
                    help="relative trial-to-trial jitter of ORN drive")
     p.add_argument("--odors", default=None, help="comma-separated names")
@@ -196,13 +228,12 @@ def main():
         v = np.where(np.isnan(resp), 0.0, resp)
         for _ in range(args.trials):
             d = np.zeros(N)
-            d[is_orn] = args.base + args.gain * v * (
+            d[is_orn] = args.gain * v * (
                 1.0 + args.drive_sigma * rng.standard_normal(n_orn))
             trials_spec.append((pi, "odor", oi, d))
     for _ in range(args.n_blank):
         d = np.zeros(N)
-        d[is_orn] = args.base * (
-            1.0 + args.drive_sigma * rng.standard_normal(n_orn))
+        d[is_orn] = 0.0
         trials_spec.append((len(odor_idx), "blank", -1, d))
     n_total = len(trials_spec)
 
@@ -253,7 +284,7 @@ def main():
         "trials_per_odor": args.trials, "n_blank": args.n_blank,
         "nbins": args.nbins, "traj_bins": args.traj_bins,
         "drive_sigma": args.drive_sigma,
-        "base_pA": args.base, "gain_pA": args.gain,
+        "base_pA": args.base, "gain_pA": args.gain, "pulse": args.pulse,
         "simtime_ms": args.simtime, "stim_start_ms": args.stim_start,
         "stim_dur_ms": args.stim_dur, "glom_names": types,
         "workers": n_workers,

@@ -25,8 +25,13 @@ from brian2 import *
 import prepare_olfaction as op
 
 
-def build_network(n_neurons, i_arr, j_arr, w_syn):
-    """Fresh deterministic Brian2 LIF network over the neuron set."""
+def build_network(n_neurons, i_arr, j_arr, w_syn, timed=False):
+    """Fresh deterministic Brian2 LIF network over the neuron set.
+
+    If timed=True the per-neuron input current is a 2D TimedArray
+    `drive_ta(t, i)` (set per-trial via G.namespace); otherwise `I_drive` is a
+    static per-neuron parameter (the original tonic drive path used by run_odors).
+    """
     start_scope()
     defaultclock.dt = 0.1 * ms
     Cm = 1 * pF
@@ -37,16 +42,24 @@ def build_network(n_neurons, i_arr, j_arr, w_syn):
     Vt = -50 * mV
     Vr = -65 * mV
     tau_syn = 2 * ms
-    eqs = """
-    dv/dt = (El - v)/tau + (Isyn + I_drive)*Rres/tau : volt
-    dIsyn/dt = -Isyn/tau_syn : amp
-    I_drive : amp
-    """
+    if timed:
+        eqs = """
+        dv/dt = (El - v)/tau + (Isyn + I_drive)*Rres/tau : volt
+        dIsyn/dt = -Isyn/tau_syn : amp
+        I_drive = drive_ta(t, i) : amp
+        """
+    else:
+        eqs = """
+        dv/dt = (El - v)/tau + (Isyn + I_drive)*Rres/tau : volt
+        dIsyn/dt = -Isyn/tau_syn : amp
+        I_drive : amp
+        """
     G = NeuronGroup(n_neurons, model=eqs, threshold="v > Vt",
                     reset="v = Vr", refractory=2 * ms, method="euler",
                     namespace={"tau": tau, "tau_syn": tau_syn,
                                "Rres": Rres, "El": El, "Vt": Vt, "Vr": Vr})
-    G.I_drive = 0 * amp
+    if not timed:
+        G.I_drive = 0 * amp
     S = Synapses(G, G, model="weight : 1", on_pre="Isyn += weight*amp")
     S.connect(i=i_arr, j=j_arr)
     S.weight = w_syn
