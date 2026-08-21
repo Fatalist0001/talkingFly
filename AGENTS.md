@@ -39,6 +39,14 @@ roadmap (odor -> brain -> decoder -> LLM).
   `decoder/baseline.json`), `decoder_ablation.py` (ORN/non-ORN/all,
   `decoder/ablation.json`), `decoder_open.py` (MLP closed + brain→embedding
   regression for unseen odors, `decoder/open.json`). scikit-learn is installed.
+  NOTE: `decoder/dataset.npz` is currently generated at gain=40 (stronger drive;
+  min odor-state corr 0.78 vs 0.92 at gain=5) for better separability.
+- Contrastive / relational metric learning (stage 4.7):
+  `.\.venv\Scripts\python.exe decoder_contrast.py` — PCA features + InfoNCE
+  (plain) and relational (inner-product == DoOR similarity) encoders; evaluates
+  held-out retrieval against DoOR-neighbors, writes `decoder/contrast.json`.
+  Plain InfoNCE hurts held-out (erases chemical structure); relational is the
+  right objective. `sweep_analyze.py <sweepdir>` reports separability metrics.
 
 ## Hard constraints (do not break)
 

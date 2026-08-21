@@ -56,9 +56,9 @@ def _chunkify(specs, n):
 def _run_chunk(specs):
     out = []
     for (label, kind, oi, drive_orn) in specs:
-        counts, bins = simulate_trial(
+        counts, bins, traj = simulate_trial(
             drive_orn, _ARGS, _N, _IS_ORN, _I_ARR, _J_ARR, _W_SYN)
-        out.append((counts, bins, label, kind, oi))
+        out.append((counts, bins, traj, label, kind, oi))
     return out
 
 
@@ -77,10 +77,12 @@ def simulate_trial(drive_orn, args, N, is_orn, i_arr, j_arr, w_syn):
     G.I_drive[~is_orn] = 0 * amp
     run((args.simtime - args.stim_start - args.stim_dur) * ms)
 
-    t_w = sm.t[:] / ms
-    i_w = sm.i[:]
-    win = (t_w >= args.stim_start) & (t_w < args.stim_start + args.stim_dur)
-    tw, iw = t_w[win], i_w[win]
+    t_all = sm.t[:] / ms
+    i_all = sm.i[:]
+
+    # ---- stimulus-window features (as before) --------------------------------
+    win = (t_all >= args.stim_start) & (t_all < args.stim_start + args.stim_dur)
+    tw, iw = t_all[win], i_all[win]
     B = args.nbins
     binw = args.stim_dur / B
     counts = np.bincount(iw, minlength=N).astype(np.float32)
@@ -89,7 +91,14 @@ def simulate_trial(drive_orn, args, N, is_orn, i_arr, j_arr, w_syn):
         0, B - 1)
     flat = bind * N + iw
     bins = np.bincount(flat, minlength=B * N).astype(np.float32).reshape(B, N)
-    return counts, bins
+
+    # ---- full-window temporal trajectory (lever 2) ---------------------------
+    TB = args.traj_bins
+    edges = np.linspace(0.0, args.simtime, TB + 1)
+    tb = np.clip(np.searchsorted(edges, t_all, side="right") - 1, 0, TB - 1)
+    traj = np.bincount(tb * N + i_all, minlength=TB * N).astype(np.float32) \
+        .reshape(TB, N)
+    return counts, bins, traj
 
 
 def select_odors(matrix, names, n_want, seed, max_corr=0.9,
@@ -135,6 +144,8 @@ def main():
     p.add_argument("--stim-start", type=float, default=50, help="ms, odor onset")
     p.add_argument("--stim-dur", type=float, default=70, help="ms, odor duration")
     p.add_argument("--nbins", type=int, default=7, help="PSTH bins in window")
+    p.add_argument("--traj-bins", type=int, default=30,
+                   help="full-window PSTH bins (temporal trajectory feature)")
     p.add_argument("--base", type=float, default=1.0, help="pA tonic ORN drive")
     p.add_argument("--gain", type=float, default=5.0, help="pA per resp unit")
     p.add_argument("--drive-sigma", type=float, default=0.15,
@@ -212,23 +223,27 @@ def main():
           f"(workers={n_workers})", flush=True)
 
     # ---- assemble -------------------------------------------------------------
-    X_counts, X_bins, y, trials_meta = [], [], [], []
+    X_counts, X_bins, X_traj, y, trials_meta = [], [], [], [], []
     for chunk in results:
-        for (counts, bins, label, kind, oi) in chunk:
+        for (counts, bins, traj, label, kind, oi) in chunk:
             X_counts.append(counts)
             X_bins.append(bins)
+            X_traj.append(traj)
             y.append(label)
             trials_meta.append({"kind": kind, "odor_index": int(oi)})
     X_counts = np.array(X_counts, dtype=np.float32)
     X_bins = np.array(X_bins, dtype=np.float32)
+    X_traj = np.array(X_traj, dtype=np.float32)
     X_glom = X_counts @ onehot
     X_glom_bins = X_bins @ onehot
+    X_glom_traj = X_traj @ onehot
     y = np.array(y, dtype=np.int64)
 
     os.makedirs(args.outdir, exist_ok=True)
     np.savez(os.path.join(args.outdir, "dataset.npz"),
-             X_counts=X_counts, X_bins=X_bins, X_glom=X_glom,
-             X_glom_bins=X_glom_bins, y=y,
+             X_counts=X_counts, X_bins=X_bins, X_traj=X_traj,
+             X_glom=X_glom, X_glom_bins=X_glom_bins,
+             X_glom_traj=X_glom_traj, y=y,
              root_ids=chosen.astype(np.int64), is_orn=is_orn,
              group_ids=group_ids)
     with open(os.path.join(args.outdir, "odor_names.json"), "w") as f:
@@ -236,7 +251,8 @@ def main():
     pd_meta = {
         "n_neurons": N, "n_orns": int(is_orn.sum()), "n_odors": len(odor_idx),
         "trials_per_odor": args.trials, "n_blank": args.n_blank,
-        "nbins": args.nbins, "drive_sigma": args.drive_sigma,
+        "nbins": args.nbins, "traj_bins": args.traj_bins,
+        "drive_sigma": args.drive_sigma,
         "base_pA": args.base, "gain_pA": args.gain,
         "simtime_ms": args.simtime, "stim_start_ms": args.stim_start,
         "stim_dur_ms": args.stim_dur, "glom_names": types,
