@@ -11,19 +11,85 @@ plus labels y, neuron/glom metadata and a params json.
 Odor selection samples a chemically diverse subset of the 691 DoOR odors
 (greedy: drop candidates too similar to already-kept ones).
 
+Trials are generated in parallel across CPU cores (numpy device).  Each trial
+is simulated in its own fresh network, so the dataset is bit-for-bit the same
+as a serial run (drive vectors are pre-drawn in the parent with a fixed seed).
+
 Usage:
-    python build_odor_dataset.py --n-odors 30 --trials 20 --drive-sigma 0.15
+  python build_odor_dataset.py --n-odors 30 --trials 20 --drive-sigma 0.15
+  python build_odor_dataset.py --workers 8 --n-odors 100 --trials 100
 """
 import argparse
 import json
 import os
 import time
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 from brian2 import *
 
 import prepare_olfaction as op
 from run_odors import build_network, build_subgraph
+
+
+# ---- worker globals (set once per subprocess) ------------------------------
+_ARGS = None
+_N = None
+_IS_ORN = None
+_I_ARR = None
+_J_ARR = None
+_W_SYN = None
+
+
+def _init_worker(args, N, is_orn, i_arr, j_arr, w_syn):
+    global _ARGS, _N, _IS_ORN, _I_ARR, _J_ARR, _W_SYN
+    _ARGS, _N, _IS_ORN = args, N, is_orn
+    _I_ARR, _J_ARR, _W_SYN = i_arr, j_arr, w_syn
+
+
+def _chunkify(specs, n):
+    n = max(1, min(n, len(specs)))
+    k = (len(specs) + n - 1) // n
+    return [specs[i:i + k] for i in range(0, len(specs), k)]
+
+
+def _run_chunk(specs):
+    out = []
+    for (label, kind, oi, drive_orn) in specs:
+        counts, bins = simulate_trial(
+            drive_orn, _ARGS, _N, _IS_ORN, _I_ARR, _J_ARR, _W_SYN)
+        out.append((counts, bins, label, kind, oi))
+    return out
+
+
+def simulate_trial(drive_orn, args, N, is_orn, i_arr, j_arr, w_syn):
+    """Simulate one trial. drive_orn: (N,) pA drive (non-ORN set to 0)."""
+    G, S, sm, Rres, El = build_network(N, i_arr, j_arr, w_syn)
+    G.v = El + args.base * pA * Rres
+    G.I_drive[:] = args.base * pA
+    G.I_drive[~is_orn] = 0 * amp
+    run(args.stim_start * ms)
+    d = np.zeros(N)
+    d[is_orn] = np.clip(drive_orn[is_orn], 0.0, None)
+    G.I_drive[:] = d * pA
+    run(args.stim_dur * ms)
+    G.I_drive[:] = args.base * pA
+    G.I_drive[~is_orn] = 0 * amp
+    run((args.simtime - args.stim_start - args.stim_dur) * ms)
+
+    t_w = sm.t[:] / ms
+    i_w = sm.i[:]
+    win = (t_w >= args.stim_start) & (t_w < args.stim_start + args.stim_dur)
+    tw, iw = t_w[win], i_w[win]
+    B = args.nbins
+    binw = args.stim_dur / B
+    counts = np.bincount(iw, minlength=N).astype(np.float32)
+    bind = np.clip(np.searchsorted(
+        np.arange(B + 1) * binw + args.stim_start, tw, side="right") - 1,
+        0, B - 1)
+    flat = bind * N + iw
+    bins = np.bincount(flat, minlength=B * N).astype(np.float32).reshape(B, N)
+    return counts, bins
 
 
 def select_odors(matrix, names, n_want, seed, max_corr=0.9,
@@ -78,6 +144,8 @@ def main():
     p.add_argument("--trials", type=int, default=20, help="trials per odor")
     p.add_argument("--n-blank", type=int, default=10, help="blank trials")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--workers", type=int, default=os.cpu_count(),
+                   help="parallel CPU workers (0/1 = serial)")
     p.add_argument("--outdir", default="decoder")
     args = p.parse_args()
 
@@ -108,73 +176,54 @@ def main():
     onehot = np.zeros((N, D), dtype=np.float32)
     onehot[np.arange(N), group_ids] = 1.0
 
-    # ---- build dataset --------------------------------------------------------
-    X_counts, X_bins, X_glom, X_glom_bins, y, trials_meta = \
-        [], [], [], [], [], []
-    B = args.nbins
-    binw = args.stim_dur / B
-
-    def append_trial(counts, bins, label, kind, oi):
-        X_counts.append(counts)
-        X_bins.append(bins)
-        X_glom.append(counts @ onehot)
-        X_glom_bins.append(bins @ onehot)
-        y.append(label)
-        trials_meta.append({"kind": kind, "odor_index": int(oi)})
+    # ---- pre-draw every trial's drive vector (fixed seed -> reproducible) -----
     t_begin = time.perf_counter()
-    n_total = (len(odor_idx) * args.trials) + args.n_blank
-
-    def run_trial(drive_orn):
-        """drive_orn: (N,) float pA on ORN (non-ORN overwritten to 0)."""
-        G, S, sm, Rres, El = build_network(N, i_arr, j_arr, w_syn)
-        G.v = El + args.base * pA * Rres
-        G.I_drive[:] = args.base * pA
-        G.I_drive[~is_orn] = 0 * amp
-        run(args.stim_start * ms)
-        d = np.zeros(N)
-        d[is_orn] = np.clip(drive_orn[is_orn], 0.0, None)
-        G.I_drive[:] = d * pA
-        run(args.stim_dur * ms)
-        G.I_drive[:] = args.base * pA
-        G.I_drive[~is_orn] = 0 * amp
-        run((args.simtime - args.stim_start - args.stim_dur) * ms)
-
-        t_w = sm.t[:] / ms
-        i_w = sm.i[:]
-        win = (t_w >= args.stim_start) & (t_w < args.stim_start + args.stim_dur)
-        tw, iw = t_w[win], i_w[win]
-        counts = np.bincount(iw, minlength=N).astype(np.float32)
-        bind = np.clip(np.searchsorted(
-            np.arange(B + 1) * binw + args.stim_start, tw, side="right") - 1,
-            0, B - 1)
-        flat = bind * N + iw
-        bins = np.bincount(flat, minlength=B * N).astype(np.float32).reshape(B, N)
-        return counts, bins
-
-    for pi, oi in enumerate(odor_idx):  # pi = label of this odor
+    n_orn = int(is_orn.sum())
+    trials_spec = []
+    for pi, oi in enumerate(odor_idx):          # pi = label of this odor
         resp = matrix[:, oi]
         v = np.where(np.isnan(resp), 0.0, resp)
         for _ in range(args.trials):
             d = np.zeros(N)
             d[is_orn] = args.base + args.gain * v * (
-                1.0 + args.drive_sigma * rng.standard_normal(int(is_orn.sum())))
-            counts, bins = run_trial(d)
-            append_trial(counts, bins, pi, "odor", oi)
+                1.0 + args.drive_sigma * rng.standard_normal(n_orn))
+            trials_spec.append((pi, "odor", oi, d))
     for _ in range(args.n_blank):
         d = np.zeros(N)
         d[is_orn] = args.base * (
-            1.0 + args.drive_sigma * rng.standard_normal(int(is_orn.sum())))
-        counts, bins = run_trial(d)
-        append_trial(counts, bins, len(odor_idx), "blank", -1)
+            1.0 + args.drive_sigma * rng.standard_normal(n_orn))
+        trials_spec.append((len(odor_idx), "blank", -1, d))
+    n_total = len(trials_spec)
 
+    # ---- run trials (parallel) ------------------------------------------------
+    n_workers = 1 if (args.workers or 0) <= 1 else args.workers
+    if n_workers > 1 and n_total > 1:
+        with ProcessPoolExecutor(
+                max_workers=n_workers,
+                initializer=_init_worker,
+                initargs=(args, N, is_orn, i_arr, j_arr, w_syn)) as ex:
+            chunks = _chunkify(trials_spec, n_workers)
+            results = list(ex.map(_run_chunk, chunks))
+    else:
+        _init_worker(args, N, is_orn, i_arr, j_arr, w_syn)
+        results = [_run_chunk(trials_spec)]
+    print(f"built {n_total}/{n_total} trials in "
+          f"{time.perf_counter() - t_begin:.1f}s "
+          f"(workers={n_workers})", flush=True)
+
+    # ---- assemble -------------------------------------------------------------
+    X_counts, X_bins, y, trials_meta = [], [], [], []
+    for chunk in results:
+        for (counts, bins, label, kind, oi) in chunk:
+            X_counts.append(counts)
+            X_bins.append(bins)
+            y.append(label)
+            trials_meta.append({"kind": kind, "odor_index": int(oi)})
     X_counts = np.array(X_counts, dtype=np.float32)
     X_bins = np.array(X_bins, dtype=np.float32)
-    X_glom = np.array(X_glom, dtype=np.float32)
-    X_glom_bins = np.array(X_glom_bins, dtype=np.float32)
+    X_glom = X_counts @ onehot
+    X_glom_bins = X_bins @ onehot
     y = np.array(y, dtype=np.int64)
-    seen = len(y)
-    print(f"\nbuilt {seen}/{n_total} trials in "
-          f"{time.perf_counter() - t_begin:.1f}s")
 
     os.makedirs(args.outdir, exist_ok=True)
     np.savez(os.path.join(args.outdir, "dataset.npz"),
@@ -187,10 +236,11 @@ def main():
     pd_meta = {
         "n_neurons": N, "n_orns": int(is_orn.sum()), "n_odors": len(odor_idx),
         "trials_per_odor": args.trials, "n_blank": args.n_blank,
-        "nbins": B, "drive_sigma": args.drive_sigma,
+        "nbins": args.nbins, "drive_sigma": args.drive_sigma,
         "base_pA": args.base, "gain_pA": args.gain,
         "simtime_ms": args.simtime, "stim_start_ms": args.stim_start,
         "stim_dur_ms": args.stim_dur, "glom_names": types,
+        "workers": n_workers,
         "wall_s": round(time.perf_counter() - t_begin, 1),
     }
     with open(os.path.join(args.outdir, "meta.json"), "w") as f:
@@ -206,11 +256,10 @@ def main():
     print("\nper-odor reproducibility (intra-trial correlation):")
     for l in range(len(odor_idx)):
         vs = Xo[lab_o == l]
-        rep = float(np.corrcoef(vs)[np.triu_indices(len(vs), 1)].mean())\
+        rep = float(np.corrcoef(vs)[np.triu_indices(len(vs), 1)].mean()) \
             if len(vs) > 1 else float("nan")
         print(f"  {names[odor_idx[l]]:26s} trials={len(vs)} "
               f"intra-corr={rep:.2f} norm={np.linalg.norm(means[l]):.1f}")
-    # cross-odor min corr of means
     c = np.corrcoef(means)
     off = np.abs(c[np.triu_indices(len(means), 1)])
     print(f"\nmin pairwise corr of mean states (odor vs odor): {off.min():.3f}")

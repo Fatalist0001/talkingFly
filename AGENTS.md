@@ -29,6 +29,10 @@ roadmap (odor -> brain -> decoder -> LLM).
   `.\.venv\Scripts\python.exe build_odor_dataset.py --n-odors 36 --trials 20
   --drive-sigma 0.15` — repeated trials with stimulus jitter for many odors,
   writes `decoder/dataset.npz` (X_counts / X_bins / X_glom / X_glom_bins),
+  `decoder/odor_names.json`, `decoder/meta.json`. Use `--workers N` to run
+  trials in parallel across CPU cores (numpy device; speeds up ~2x at scale).
+  Drive vectors are pre-drawn in the parent with `--seed`, so the dataset is
+  bit-identical to a serial run.
   `decoder/odor_names.json`, `decoder/meta.json`. Takes ~6 min.
 - Decoder baselines / ablations / open-set (stages 4.2-4.5):
   `.\.venv\Scripts\python.exe decoder_baseline.py` (closed + held-out,
@@ -43,6 +47,11 @@ roadmap (odor -> brain -> decoder -> LLM).
 - **brian2cuda/GPU does not work on native Windows** (brian2cuda issue #225).
   Do not retry; CPU (numpy) device is the working path. GPU requires WSL2/Linux,
   which is not installed.
+- **cpp_standalone is NOT usable for the dataset generator.** Two reasons:
+  (1) it forbids multiple `run()` per build, but each trial already does
+  rest→stim→rest runs; (2) the per-neuron time-varying ORN drive would have to
+  be baked into the C++ source as a huge literal. Use CPU multiprocessing
+  (`--workers N`) instead — it keeps exact dataset semantics.
 - `proofread_connections_783.feather` is a read-only input: columns
   `pre_pt_root_id`, `post_pt_root_id`, `neuropil`, `syn_count`, transmitter
   averages. 16.8M rows, 138k neurons. Do not modify or regenerate it.
