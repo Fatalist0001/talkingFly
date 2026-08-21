@@ -50,6 +50,10 @@ roadmap (odor -> brain -> decoder -> LLM).
   held-out retrieval against DoOR-neighbors, writes `decoder/contrast.json`.
   Plain InfoNCE hurts held-out (erases chemical structure); relational is the
   right objective. `sweep_analyze.py <sweepdir>` reports separability metrics.
+- Robustness (stage 4.3): `.\.venv\Scripts\python.exe decoder_robust.py` —
+  relational-contrastive pipeline re-run under input noise, neuron dropout and
+  shortened observation window; writes `decoder/robust.json`. Decoder is robust
+  to noise/dropout; windows <=10 bins (<=33ms) collapse the PCA.
 
 ## Hard constraints (do not break)
 
