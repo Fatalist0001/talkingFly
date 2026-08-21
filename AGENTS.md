@@ -30,6 +30,11 @@ roadmap (odor -> brain -> decoder -> LLM).
   --drive-sigma 0.15` — repeated trials with stimulus jitter for many odors,
   writes `decoder/dataset.npz` (X_counts / X_bins / X_glom / X_glom_bins),
   `decoder/odor_names.json`, `decoder/meta.json`. Takes ~6 min.
+- Decoder baselines / ablations / open-set (stages 4.2-4.5):
+  `.\.venv\Scripts\python.exe decoder_baseline.py` (closed + held-out,
+  `decoder/baseline.json`), `decoder_ablation.py` (ORN/non-ORN/all,
+  `decoder/ablation.json`), `decoder_open.py` (MLP closed + brain→embedding
+  regression for unseen odors, `decoder/open.json`). scikit-learn is installed.
 
 ## Hard constraints (do not break)
 
@@ -58,6 +63,11 @@ roadmap (odor -> brain -> decoder -> LLM).
 - `flynet.log` and `flynet_result.json` are generated artifacts, not sources.
 - `results_odor/` is a generated stage-3 artifact (spike rasters + states).
 - `decoder/` is a generated stage-4 artifact (dataset.npz + metadata).
+- sklearn `LinearSVC` **hangs** on these datasets; use `SGDClassifier(loss="hinge")`
+  as the linear-SVM baseline instead. `LinearSVC` with 37 classes / 3097+ feats
+  never returned (tested). Large representations (X_bins = 7×3097 feats): avoid
+  broadcasting (n × n_seen × feat) distance tensors — compute pairwise dist
+  per-prototype, else it OOMs (>10 GB).
 
 ## Model (flynet.py / run_odors.py) summary
 

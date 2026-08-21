@@ -15,13 +15,13 @@ import time
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
-from sklearn.svm import LinearSVC
+from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import StratifiedShuffleSplit
 
 SEED = 0
 N_HELD = 9          # odors held out in the generalization test
-N_SPLITS = 5
+N_SPLITS = 3
 TEST_FRAC = 0.25
 
 
@@ -48,7 +48,9 @@ def clfs():
     return {
         "logreg": LogisticRegression(
             C=1.0, max_iter=2000, solver="lbfgs"),
-        "linear_svc": LinearSVC(C=1.0, max_iter=5000),
+        "linear_svm": SGDClassifier(
+            loss="hinge", alpha=1e-4, max_iter=2000, tol=1e-4,
+            random_state=SEED),
     }
 
 
@@ -115,7 +117,11 @@ def heldout_metrics(X, y, n_odor, names, all_names, resp, n_cls):
     scl = StandardScaler().fit(X)
     Z = scl.transform(X)
     proto = np.stack([Z[y == c].mean(0) for c in seen])   # (n_seen, n_feat)
-    dist = np.linalg.norm(Z[:, None, :] - proto[None, :, :], axis=2)
+    # pairwise Euclidean without materialising the (n x n_seen x f) tensor
+    dist = np.empty((Z.shape[0], len(seen)))
+    for i, p in enumerate(proto):
+        d = Z - p
+        dist[:, i] = np.sqrt(np.einsum("ij,ij->i", d, d))
 
     hit1, hit3, cnt = 0.0, 0.0, 0
     for c in held:
@@ -152,27 +158,37 @@ def main():
     t0 = time.perf_counter()
 
     d, names, meta, all_names, resp = load(args.outdir)
+    print("loaded data", flush=True)
     y = d["y"]
     n_odor = int(meta["n_odors"])
     n_cls = len(names)
     reps = make_reps(d)
-
-    report = {}
-    for rep, X in reps.items():
-        cs = closed_set(X, y, n_cls)
-        ho = heldout_metrics(X, y, n_odor, names, all_names, resp, n_cls)
-        report[rep] = {"closed": cs, "heldout": ho}
-        print(f"\n=== {rep} (n_features={X.shape[1]}) ===")
-        for cname, r in cs.items():
-            print(f"  closed-set {cname:10s}: acc@1={r['acc@1']:.3f} "
-                  f"acc@3={r['acc@3']:.3f} blank_acc={r['blank_acc']:.3f}")
-        print(f"  held-out (n={ho['n_held']}): hit@1={ho['hit@1_vs_doornb']:.3f} "
-              f"hit@3={ho['hit@3_vs_doornb']:.3f} "
-              f"(chance@1={ho['chance_hit@1']:.3f})  blank sep="
-              f"{ho['blank_min_sep']:.1f} min-dist units")
+    print("built reps:", list(reps.keys()), flush=True)
 
     nd = {"n_cls": n_cls, "n_odors": n_odor, "chance_baseline": 1.0 / n_cls}
     out_path = os.path.join(args.outdir, "baseline.json")
+
+    report = {}
+    for rep, X in reps.items():
+        print(f"> rep {rep} start", flush=True)
+        cs = closed_set(X, y, n_cls)
+        print(f"> rep {rep} closed done", flush=True)
+        ho = heldout_metrics(X, y, n_odor, names, all_names, resp, n_cls)
+        print(f"> rep {rep} heldout done", flush=True)
+        report[rep] = {"closed": cs, "heldout": ho}
+        with open(out_path, "w") as f:
+            json.dump({"report": report, "note": nd}, f, indent=2)
+        print(f"  (saved so far)", flush=True)
+        print(f"\n=== {rep} (n_features={X.shape[1]}) ===", flush=True)
+        for cname, r in cs.items():
+            print(f"  closed-set {cname:10s}: acc@1={r['acc@1']:.3f} "
+                  f"acc@3={r['acc@3']:.3f} blank_acc={r['blank_acc']:.3f}",
+                  flush=True)
+        print(f"  held-out (n={ho['n_held']}): hit@1={ho['hit@1_vs_doornb']:.3f} "
+              f"hit@3={ho['hit@3_vs_doornb']:.3f} "
+              f"(chance@1={ho['chance_hit@1']:.3f})  blank sep="
+              f"{ho['blank_min_sep']:.1f} min-dist units", flush=True)
+
     with open(out_path, "w") as f:
         json.dump({"report": report, "note": nd}, f, indent=2)
     print(f"\nsaved {out_path}  ({time.perf_counter() - t0:.1f}s)")
