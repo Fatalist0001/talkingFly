@@ -16,8 +16,17 @@ Usage:
   python stage5_fly_speaks.py --odor benzaldehyde  # specific odor
   python stage5_fly_speaks.py --list               # show available odors
   python stage5_fly_speaks.py --blank              # empty air
-  python stage5_fly_speaks.py --dataset-trial      # reuse dataset row (fast)
-  python stage5_fly_speaks.py --no-llm             # decode only
+   python stage5_fly_speaks.py --dataset-trial      # reuse dataset row (fast)
+   python stage5_fly_speaks.py --no-llm             # decode only
+   python stage5_fly_speaks.py --bridge emb         # direct brain->embedding
+   python stage5_fly_speaks.py --bridge hyb         # brain->DoOR->text mix
+
+Bridges (stage 5b, decoder/bridge_emb.npz):
+  name  - closed-set classifier -> chemical name -> LLM knowledge (original)
+  emb   - brain state regressed directly into gemma text-embedding space,
+          nearest sensory phrases are fed to the fly persona (no names)
+  hyb   - brain -> predicted DoOR receptor profile -> soft mixture of seen
+          odors' text centroids -> phrases; generalizes to UNSEEN odors
 
 The script starts llama-server itself if it is not already running.
 """
@@ -231,6 +240,51 @@ def smell_description(base_url, name):
     return desc or "неизвестным веществом"
 
 
+# ---- direct embedding bridges (stage 5b) ------------------------------------
+def load_bridge(path=os.path.join(DATA_DIR, "bridge_emb.npz")):
+    return np.load(path)
+
+
+def _top_phrases(vec, b, k=3):
+    """Top-k corpus phrases with distinct odors for a unit meaning vector."""
+    sims = b["phrase_embs"] @ vec
+    order = np.argsort(-sims)
+    picked, got = [], set()
+    for t in order:
+        o = int(b["phrase_owners"][t])
+        if o >= 0 and o not in got:
+            picked.append((str(b["phrase_texts"][t]), o, float(sims[t])))
+            got.add(o)
+        if len(picked) == k:
+            break
+    return picked
+
+
+def emb_predict(state, b):
+    """Pure direct bridge: brain state -> text-space vector."""
+    x = state.reshape(1, -1).astype(np.float64)
+    z = ((x - b["fpca_mean"]) @ b["fpca_comps"].T) / b["fpca_scale"]
+    e = b["ridge_intercept"] + z @ b["ridge_coef"].T
+    e = e @ b["tpca_comps"] + b["tpca_mean"]      # back to full text space
+    nrm = np.linalg.norm(e, axis=1, keepdims=True)
+    return (e / np.maximum(nrm, 1e-9))[0]
+
+
+def hyb_predict(state, b):
+    """Hybrid bridge: brain -> predicted DoOR profile -> text mixture."""
+    x = state.reshape(1, -1).astype(np.float64)
+    z = ((x - b["fpca_mean"]) @ b["fpca_comps"].T) / b["fpca_scale"]
+    p = (z @ b["reg78_coef"]).ravel()
+    p /= max(np.linalg.norm(p), 1e-9)
+    pc = p - p.mean()                    # centered corr vs odor profiles
+    sims = pc @ b["door_cols"]
+    temp = float(b["hybrid_temp"])
+    w = np.exp((sims - sims.max()) / temp)
+    w /= w.sum()
+    v = w @ b["text_targets"]
+    return v / max(np.linalg.norm(v), 1e-9)
+
+
 def fly_phrase(base_url, facts):
     system = (
         "Ты — дрозофила, маленькая мушка. Ты не ассистент и не учёный: ты "
@@ -250,11 +304,19 @@ def main():
                    help="odor name (substring match); default random")
     p.add_argument("--blank", action="store_true", help="simulate empty air")
     p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--sniffs", type=int, default=1,
+                   help="average this many fresh simulations (plume "
+                        "sampling); reduces single-trial noise")
     p.add_argument("--dataset-trial", action="store_true",
                    help="take a stored dataset row instead of simulating")
     p.add_argument("--list", action="store_true",
                    help="list dataset odors and exit")
     p.add_argument("--no-llm", action="store_true", help="decode only")
+    p.add_argument("--bridge", choices=["name", "emb", "hyb"], default="name",
+                   help="name: decode odor name then LLM knowledge; "
+                        "emb: brain->text embedding directly; "
+                        "hyb: brain->DoOR profile->text mixture (best for "
+                        "unseen odors)")
     p.add_argument("--shutdown", action="store_true",
                    help="stop the llama-server and exit")
     p.add_argument("--keep-server", action="store_true",
@@ -308,25 +370,45 @@ def main():
                 pool = [n for n in odor_names if n != "__blank__"
                         and op.find_odor(n, all_names) >= 0]
                 odor = pool[int(rng.integers(len(pool)))]
-            state, dec_oi, all_names, matrix = simulate_state(odor, 
+            state, dec_oi, all_names, matrix = simulate_state(odor,
                                                               args.seed or 0)
+            for k in range(1, max(1, args.sniffs)):
+                s_k, _, _, _ = simulate_state(
+                    odor, (args.seed or 0) + 7919 * k)
+                state = state + s_k
+            if args.sniffs > 1:
+                state = state / max(1, args.sniffs)
             truth, source = all_names[dec_oi], "fresh simulation"
 
     # ---- decode ---------------------------------------------------------------
-    model = train_decoder(d)
     total = float(state.sum())
-    if total <= model["blank_thr"]:
-        verdict, top, conf = "__blank__", [], 0.0
+    is_blank = False
+    hits = None
+    if args.bridge == "name":
+        model = train_decoder(d)
+        if total <= model["blank_thr"]:
+            is_blank = True
+        else:
+            X = state.reshape(1, -1)
+            pr = model["clf"].predict_proba(model["scaler"].transform(X))[0]
+            order = np.argsort(pr)[::-1][:3]
+            top = [(odor_names[i], float(pr[i])) for i in order]
+            verdict, conf = top[0]
     else:
-        X = state.reshape(1, -1)
-        pr = model["clf"].predict_proba(model["scaler"].transform(X))[0]
-        order = np.argsort(pr)[::-1][:3]
-        top = [(odor_names[i], float(pr[i])) for i in order]
-        verdict, conf = top[0]
+        b = load_bridge()
+        if total <= float(b["blank_thr"]):
+            is_blank = True
+        else:
+            vec = emb_predict(state, b) if args.bridge == "emb" \
+                else hyb_predict(state, b)
+            hits = _top_phrases(vec, b)
 
     print(f"\n=== pipeline trace ({source}) ===")
     print(f"truth: {truth}   ORN spikes in window: {total:.0f}")
-    if top:
+    if hits is not None:
+        print("мост:", ", ".join(f"«{p}» [{odor_names[o]}]"
+                                 for p, o, _ in hits))
+    if args.bridge == "name" and not is_blank and hits is None:
         print("decoder:", ", ".join(f"{n} {c:.0%}" for n, c in top))
 
     if args.no_llm:
@@ -335,12 +417,12 @@ def main():
     # ---- context + phrase -----------------------------------------------------
     spawned = ensure_server(args.server_url)
     med = float(np.median(d["X_glom"].sum(1)[d["y"] < n_odors]))
-    if verdict == "__blank__":
+    if is_blank:
         facts = ("сейчас НИЧЕГО не пахнет, воздух чистый. Скажи одной "
                  "фразой, что не чуешь ничего (можно пожаловаться на "
                  "скуку или полетать вхолостую).")
         intro = "[пустой воздух]"
-    else:
+    elif args.bridge == "name":
         intensity = ("едва уловимый" if total < 0.33 * med
                      else "отчётливый" if total < 2.0 * med
                      else "очень резкий")
@@ -358,6 +440,16 @@ def main():
         facts = (f"запах {intensity}, похож на {smell}"
                  f" (вещество {verdict}).{neigh}")
         intro = f"[декодировано: {verdict} {conf:.0%}]"
+    else:
+        intensity = ("едва уловимый" if total < 0.33 * med
+                     else "отчётливый" if total < 2.0 * med
+                     else "очень резкий")
+        shades = ", ".join(f"«{p}»" for p, _, _ in hits)
+        facts = f"запах {intensity}; антенны улавливают оттенки: {shades}"
+        tag = "мозг→эмбеддинг" if args.bridge == "emb" else "гибрид"
+        owners_str = ", ".join(odor_names[o] for _, o, _ in hits)
+        intro = (f"[мост {tag}] оттенки из корпуса "
+                 f"(источники: {owners_str})")
     print(f"\n{intro}\n[муха думает...]")
     phrase = fly_phrase(args.server_url, facts)
     print(f"\nМуха: «{phrase}»")

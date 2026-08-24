@@ -89,8 +89,28 @@ roadmap (odor -> brain -> decoder -> LLM).
   llama-server paths are hardcoded at the top of the script. Lifecycle: a
   server spawned by the script is killed at the end of the run
   (`--keep-server` to leave it up); `--shutdown` kills any server on that
-  port and exits. Thinking mode of gemma must stay disabled
-  (`enable_thinking: false`), else answers land in `reasoning_content`.
+   port and exits. Thinking mode of gemma must stay disabled
+   (`enable_thinking: false`), else answers land in `reasoning_content`.
+- Direct brain->embedding bridge (stage 5b):
+  `.\.venv\Scripts\python.exe stage5b_brain_to_embedding.py`
+  (`--offline` reuses `decoder/phrase_embs_raw.npy` and skips the server;
+  first run restarts llama-server with `--embeddings --pooling mean`).
+  Embeds a hand-written corpus of Russian sensory phrases (3/odor + blanks,
+  PHRASES dict in the script) with the same local gemma; writes
+  `decoder/text_embeddings.npy` (36x1536, mean-centered + All-but-the-Top
+  phrase centroids), `decoder/phrase_corpus.json`, `decoder/bridge_emb.npz`
+  (deployment model) and `decoder/bridge_emb.json` (report).
+  `stage5_fly_speaks.py --bridge emb|hyb [--sniffs N]`: `emb` = direct
+  brain->text-space ridge, closed-set phrase retrieval 0.94 (chance 0.03)
+  but open-set ~ chance because language space is nearly orthogonal to
+  receptor space (Spearman(text-sim, DoOR-sim) = 0.02); `hyb` = brain ->
+  predicted ORN profile -> centered-corr softmax(temp=0.05) mixture of seen
+  odors' text centroids — the one that generalizes to UNSEEN odors
+  (true-target rank 6.4/35 vs chance 17.5). `--sniffs N` averages N fresh
+  simulations (plume sampling) — needed for stable unseen-odor results
+  (geraniol hits alpha-terpineol only with N>=3). NOTE: sklearn whiten=True
+  transform also divides by sqrt(explained_variance_); bridge_emb.npz stores
+  it as fpca_scale — never drop it when re-implementing the runtime path.
 
 ## Hard constraints (do not break)
 
