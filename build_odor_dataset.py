@@ -29,7 +29,8 @@ import numpy as np
 from brian2 import *
 
 import prepare_olfaction as op
-from run_odors import build_network, build_subgraph
+from run_odors import (WEIGHT_TRANSFORMS, build_network, build_subgraph,
+                       weight_transform)
 
 
 # ---- worker globals (set once per subprocess) ------------------------------
@@ -183,6 +184,9 @@ def main():
     p.add_argument("--pulse", default="tonic",
                    choices=["tonic", "bump", "adapt"],
                    help="ORN drive time course (adapt=onset transient+tail)")
+    p.add_argument("--weight-transform", default="baseline",
+                   choices=list(WEIGHT_TRANSFORMS),
+                   help="how syn_count maps to LIF synaptic weight")
     p.add_argument("--drive-sigma", type=float, default=0.15,
                    help="relative trial-to-trial jitter of ORN drive")
     p.add_argument("--odors", default=None, help="comma-separated names")
@@ -210,6 +214,8 @@ def main():
 
     chosen, i_arr, j_arr, w_syn, is_orn = build_subgraph(
         args.feather, args.neurons, orn_ids)
+    w_syn = weight_transform(w_syn, i_arr, j_arr, len(chosen),
+                             args.weight_transform)
     N = len(chosen)
     rng = np.random.default_rng(args.seed)
 
@@ -289,6 +295,7 @@ def main():
         "nbins": args.nbins, "traj_bins": args.traj_bins,
         "drive_sigma": args.drive_sigma,
         "base_pA": args.base, "gain_pA": args.gain, "pulse": args.pulse,
+        "weight_transform": args.weight_transform,
         "simtime_ms": args.simtime, "stim_start_ms": args.stim_start,
         "stim_dur_ms": args.stim_dur, "glom_names": types,
         "workers": n_workers,

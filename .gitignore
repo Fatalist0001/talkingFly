@@ -18,3 +18,5 @@ olfactory/
 results_odor/
 decoder/
 decoder_big/
+decoder_w/
+results_weights/

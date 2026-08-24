@@ -101,6 +101,41 @@ def build_subgraph(feather, n_top_al, orn_ids):
     return chosen, i_arr, j_arr, w_syn, is_orn
 
 
+WEIGHT_TRANSFORMS = ("baseline", "binary", "sqrt", "log1p", "cap99", "indeg")
+
+
+def weight_transform(w_syn, i_arr, j_arr, n_neurons, name="baseline"):
+    """Map raw synapse counts to LIF synaptic weights.
+
+    The default 'baseline' keeps the original arbitrary scaling
+    sign * max(0.1, syn_count). Alternatives change how strongly syn_count
+    drives the LIF current jump per presynaptic spike:
+      binary - every connection equal strength (structure only)
+      sqrt / log1p - compress the dynamic range of strong edges
+      cap99   - clip syn_count at its 99th percentile (kill hub edges)
+      indeg   - divide by the postsynaptic neuron's total incoming synapses
+                (each neuron gets a ~constant total input magnitude)
+    """
+    sgn = np.where(w_syn < 0, -1.0, 1.0)
+    syn = np.abs(w_syn)
+    if name == "baseline":
+        return sgn * np.maximum(0.1, syn)
+    if name == "binary":
+        return sgn * np.ones_like(syn)
+    if name == "sqrt":
+        return sgn * np.sqrt(np.maximum(0.1, syn))
+    if name == "log1p":
+        return sgn * np.log1p(np.maximum(0.1, syn))
+    if name == "cap99":
+        cap = np.percentile(syn, 99)
+        return sgn * np.maximum(0.1, np.minimum(syn, cap))
+    if name == "indeg":
+        tot_in = np.bincount(j_arr, weights=syn, minlength=n_neurons)
+        return sgn * syn / np.maximum(tot_in[j_arr], 1.0)
+    raise ValueError(f"unknown weight transform '{name}' "
+                     f"(choose from {WEIGHT_TRANSFORMS})")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--feather", default="proofread_connections_783.feather")

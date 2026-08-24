@@ -54,6 +54,13 @@ roadmap (odor -> brain -> decoder -> LLM).
   relational-contrastive pipeline re-run under input noise, neuron dropout and
   shortened observation window; writes `decoder/robust.json`. Decoder is robust
   to noise/dropout; windows <=10 bins (<=33ms) collapse the PCA.
+- Weight-transform sweep (stage 4.9): `.\.venv\Scripts\python.exe sweep_weights.py
+  --workers 8` — quick paired comparison of syn_count→weight maps (binary/sqrt/
+  log1p/cap99/indeg vs baseline) on identical drives; writes
+  `results_weights/weights_sweep.json`. The dataset generator accepts
+  `--weight-transform <name>`; NEGATIVE result for held-out generalization, so
+  the canonical dataset stays at baseline weights. Binary-weights dataset lives
+  in `decoder_w/`.
 
 ## Hard constraints (do not break)
 
