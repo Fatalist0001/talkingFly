@@ -121,15 +121,68 @@ def find_odor(name, names, tol=0.4):
     return idx
 
 
-def stimulus(odor_idx, gain_pA=30.0, base_pA=0.0, outdir="olfactory"):
+# ---- LIF F-I curve (parameters mirror run_odors.build_network) -------------
+LIF_PARAMS = dict(tau_ms=10.0, tau_ref_ms=2.0, el_mV=-70.0, vt_mV=-50.0,
+                  vr_mV=-65.0, rgohm=10.0)
+
+
+def fi_inverse(rate_hz):
+    """Static drive current (pA) that makes our LIF neuron fire at rate_hz.
+
+    Exact steady-state inverse of f = 1/(tau_ref + tau*ln((V-Vr)/(V-Vt))) with
+    V_inf = El + I*R. Rate <= 0 -> 0 pA (silent); rate -> 0+ approaches
+    rheobase (Vt-El)/R = 2 pA.
+    """
+    p = LIF_PARAMS
+    r = np.atleast_1d(np.asarray(rate_hz, dtype=np.float64))
+    out = np.zeros_like(r)
+    m = r > 0
+    if np.any(m):
+        # inter-reset time above threshold; clamped away from 0 (rate ->
+        # 1/tau_ref needs infinite current) and from overflow
+        t_iso = np.clip(1000.0 / r[m] - p["tau_ref_ms"], 0.05, 700.0)
+        q = np.exp(t_iso / p["tau_ms"])
+        v_inf = (p["vr_mV"] - q * p["vt_mV"]) / (1.0 - q)
+        out[m] = (v_inf - p["el_mV"]) / p["rgohm"]      # mV / GOhm = pA
+    return out if out.size > 1 else float(out[0])
+
+
+def odor_drive(resp, mode="linear", base_pA=1.0, gain_pA=40.0,
+               spont_hz=8.0, max_hz=250.0):
+    """DoOR response vector -> ABSOLUTE per-ORN drive current (pA).
+
+    linear : base + gain*resp                      (canonical engineering map;
+            negative responses are the caller's business)
+    fi     : physiological shape - the response scales an ORN target RATE
+            around its spontaneous level (r>=0 pushes toward max_hz, r<0
+            toward silence), then converts rate->current via the exact F-I
+            inverse of our LIF model. A resting ORN thus sits at
+            fi_inverse(spont_hz) instead of a subthreshold floor.
+    """
+    r = np.nan_to_num(np.asarray(resp, dtype=np.float64), nan=0.0)
+    if mode == "linear":
+        return base_pA + gain_pA * r
+    if mode == "fi":
+        rate = np.where(
+            r >= 0.0,
+            spont_hz + (max_hz - spont_hz) * np.clip(r, 0.0, 1.0),
+            spont_hz * np.clip(1.0 + r, 0.0, None))
+        return fi_inverse(rate)
+    raise ValueError(f"unknown drive map '{mode}' (use linear|fi)")
+
+
+def stimulus(odor_idx, gain_pA=30.0, base_pA=0.0, outdir="olfactory",
+             drive_map="linear", spont_hz=8.0, max_hz=250.0):
     """Turn one odor into per-ORN drive currents.
 
     Returns a DataFrame with columns root_id, cell_type and I_inj_pA.
-    ORNs without response data for the odor get I_inj = base_pA.
+    ORNs without response data for the odor get the resting current
+    (base_pA for linear, fi_inverse(spont_hz) for fi).
     """
     orn, matrix, _ = load(outdir)
     vec = matrix[:, odor_idx]
-    i_inj = np.where(np.isnan(vec), base_pA, base_pA + gain_pA * vec)
+    i_inj = odor_drive(vec, drive_map, base_pA=base_pA, gain_pA=gain_pA,
+                       spont_hz=spont_hz, max_hz=max_hz)
     return pd.DataFrame({
         "root_id": orn["root_id"],
         "cell_type": orn["cell_type"],

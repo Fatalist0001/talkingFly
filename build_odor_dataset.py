@@ -102,7 +102,9 @@ def simulate_trial(drive_amp, args, N, is_orn, i_arr, j_arr, w_syn):
     t = np.arange(n_steps) * DT_MS
     env = make_env(t, args)                             # (n_steps,)
     drive_mat = np.zeros((n_steps, N), dtype=np.float32)
-    amp = np.clip(drive_amp, 0.0, None)
+    # amplitudes may be negative (inhibited ORNs in fi mode); linear path
+    # pre-clips in the parent, so no clipping here
+    amp = np.asarray(drive_amp, dtype=np.float64)
     drive_mat[:, is_orn] = (args.base + amp[is_orn][None, :] * env[:, None]).astype(np.float32)
     G.namespace["drive_ta"] = TimedArray(drive_mat * pA, dt=DT_MS * ms)
     run(args.simtime * ms)
@@ -187,6 +189,13 @@ def main():
     p.add_argument("--weight-transform", default="baseline",
                    choices=list(WEIGHT_TRANSFORMS),
                    help="how syn_count maps to LIF synaptic weight")
+    p.add_argument("--drive-map", default="linear", choices=["linear", "fi"],
+                   help="linear: base+gain*resp; fi: response->target ORN rate "
+                        "around spont -> exact LIF F-I inverse -> current")
+    p.add_argument("--spont-hz", type=float, default=8.0,
+                   help="fi map: spontaneous ORN firing rate")
+    p.add_argument("--max-hz", type=float, default=250.0,
+                   help="fi map: max odor-evoked ORN rate at resp=1")
     p.add_argument("--drive-sigma", type=float, default=0.15,
                    help="relative trial-to-trial jitter of ORN drive")
     p.add_argument("--odors", default=None, help="comma-separated names")
@@ -217,6 +226,18 @@ def main():
     w_syn = weight_transform(w_syn, i_arr, j_arr, len(chosen),
                              args.weight_transform)
     N = len(chosen)
+
+    # fi map: resting ORN current replaces the subthreshold floor; per-trial
+    # drive vectors are stored as (absolute stim current - rest) amplitudes
+    rest_pA = float(op.fi_inverse(args.spont_hz)) \
+        if args.drive_map == "fi" else args.base
+    if args.drive_map == "fi":
+        args.base = rest_pA
+    print(f"drive map: {args.drive_map}"
+          + (f" (spont={args.spont_hz}Hz max={args.max_hz}Hz "
+             f"-> rest={rest_pA:.2f}pA)"
+             if args.drive_map == "fi" else
+             f" (base={args.base}pA gain={args.gain}pA)"))
     rng = np.random.default_rng(args.seed)
 
     # ---- glomerulus grouping matrix (N, D) ------------------------------------
@@ -236,9 +257,15 @@ def main():
         resp = matrix[:, oi]
         v = np.where(np.isnan(resp), 0.0, resp)
         for _ in range(args.trials):
+            vj = v * (1.0 + args.drive_sigma *
+                      rng.standard_normal(n_orn))   # jitter the RESPONSE
             d = np.zeros(N)
-            d[is_orn] = args.gain * v * (
-                1.0 + args.drive_sigma * rng.standard_normal(n_orn))
+            if args.drive_map == "fi":
+                # amplitude relative to rest; negative = inhibited ORN
+                d[is_orn] = op.odor_drive(vj, "fi", spont_hz=args.spont_hz,
+                                          max_hz=args.max_hz) - rest_pA
+            else:
+                d[is_orn] = np.maximum(args.gain * vj, 0.0)
             trials_spec.append((pi, "odor", oi, d))
     for _ in range(args.n_blank):
         d = np.zeros(N)
@@ -295,6 +322,8 @@ def main():
         "nbins": args.nbins, "traj_bins": args.traj_bins,
         "drive_sigma": args.drive_sigma,
         "base_pA": args.base, "gain_pA": args.gain, "pulse": args.pulse,
+        "drive_map": args.drive_map,
+        "spont_hz": args.spont_hz, "max_hz": args.max_hz,
         "weight_transform": args.weight_transform,
         "simtime_ms": args.simtime, "stim_start_ms": args.stim_start,
         "stim_dur_ms": args.stim_dur, "glom_names": types,

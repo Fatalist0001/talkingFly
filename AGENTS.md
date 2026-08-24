@@ -61,6 +61,12 @@ roadmap (odor -> brain -> decoder -> LLM).
   `--weight-transform <name>`; NEGATIVE result for held-out generalization, so
   the canonical dataset stays at baseline weights. Binary-weights dataset lives
   in `decoder_w/`.
+- Physiological ORN drive (stage 4.10): `--drive-map fi` (with `--spont-hz
+  8 --max-hz 250`) maps DoOR responses to target rates through the exact LIF
+  F-I inverse (`prepare_olfaction.fi_inverse`); blank trials become active.
+  NEGATIVE result — LIF F-I compresses weak responses near rheobase, held-out
+  hit@1 drops to 0. Canonical stays `--drive-map linear` (gain=40). Dataset in
+  `decoder_fi/`.
 
 ## Hard constraints (do not break)
 

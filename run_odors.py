@@ -146,6 +146,13 @@ def main():
     p.add_argument("--base", type=float, default=1.0, help="pA tonic ORN drive")
     p.add_argument("--gain", type=float, default=5.0,
                    help="pA per unit DoOR response (0..1)")
+    p.add_argument("--drive-map", default="linear", choices=["linear", "fi"],
+                   help="linear: base+gain*resp; fi: response->target ORN rate "
+                        "around spont -> exact LIF F-I inverse -> current")
+    p.add_argument("--spont-hz", type=float, default=8.0,
+                   help="fi map: spontaneous ORN firing rate")
+    p.add_argument("--max-hz", type=float, default=250.0,
+                   help="fi map: max odor-evoked ORN rate at resp=1")
     p.add_argument("--odors",
                    default="ethyl acetate,benzaldehyde,1-octanol,"
                            "ethyl butyrate,citronellal,isobutyl acetate",
@@ -157,6 +164,13 @@ def main():
     orn_ids = orn["root_id"].astype(np.int64).to_numpy()
     orn_tab_idx = {oid: i for i, oid in enumerate(orn_ids)}
     print(f"ORNs: {len(orn_ids)}, odors in matrix: {matrix.shape[1]}")
+    print(f"drive map: {args.drive_map}"
+          + (f" (spont={args.spont_hz}Hz max={args.max_hz}Hz)"
+             if args.drive_map == "fi" else
+             f" (base={args.base}pA gain={args.gain}pA)"))
+    # resting ORN current: subthreshold floor (linear) or spont rate (fi)
+    rest_pA = args.base if args.drive_map == "linear" \
+        else float(op.fi_inverse(args.spont_hz))
 
     # ---- subgraph: top-K presynaptic in AL + all ORNs ------------------------
     chosen, i_arr, j_arr, w_syn, is_orn = build_subgraph(
@@ -172,11 +186,13 @@ def main():
     t_begin = time.perf_counter()
 
     for rank, stim_i in enumerate(odor_idx + [-1]):  # -1 = blank
-        ev = op.stimulus(stim_i, gain_pA=args.gain, base_pA=args.base) \
+        ev = op.stimulus(stim_i, gain_pA=args.gain, base_pA=args.base,
+                         drive_map=args.drive_map, spont_hz=args.spont_hz,
+                         max_hz=args.max_hz) \
             if stim_i >= 0 else None
         G, S, sm, Rres, El = build_network(len(chosen), i_arr, j_arr, w_syn)
-        G.v = El + args.base * pA * Rres
-        G.I_drive[:] = args.base * pA
+        G.v = El + rest_pA * pA * Rres
+        G.I_drive[:] = rest_pA * pA
         G.I_drive[~is_orn] = 0 * amp
 
         t0 = time.perf_counter()
@@ -188,7 +204,7 @@ def main():
             inj[is_orn] = [cur[n] for n in chosen[is_orn]]
             G.I_drive[:] = inj * pA
             run(args.stim_dur * ms)
-            G.I_drive[:] = args.base * pA
+            G.I_drive[:] = rest_pA * pA
             G.I_drive[~is_orn] = 0 * amp
             run((args.simtime - args.stim_start - args.stim_dur) * ms)
         else:
