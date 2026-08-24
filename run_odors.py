@@ -25,7 +25,36 @@ from brian2 import *
 import prepare_olfaction as op
 
 
-def build_network(n_neurons, i_arr, j_arr, w_syn, timed=False):
+def _read_edges(feather):
+    """Load the raw connectome edge table once."""
+    t = ft.read_table(feather)
+    pre = t.column("pre_pt_root_id").to_numpy()
+    post = t.column("post_pt_root_id").to_numpy()
+    npl = t.column("neuropil").to_pylist()
+    syn_c = t.column("syn_count").to_numpy().astype(np.float64)
+    tx = {k: t.column(f"{k}_avg").to_numpy()
+          for k in ("gaba", "ach", "glut", "oct", "ser", "da")}
+    return pre, post, npl, syn_c, tx
+
+
+def _select_subgraph(pre, post, npl, orn_ids, n_top_al):
+    """Top-K AL presynaptic neurons + all ORNs; returns kept-edge index maps."""
+    in_al = np.array([isinstance(x, str) and x.startswith("AL") for x in npl])
+    pre_a = pre[in_al]
+    uniq, counts = np.unique(pre_a, return_counts=True)
+    top = uniq[np.argsort(-counts)[: n_top_al]]
+    chosen = np.unique(np.concatenate([top, orn_ids]))
+    cset = set(chosen.tolist())
+    print(f"chosen neurons: {len(chosen)} "
+          f"(ORNs among them: {len(cset & set(orn_ids.tolist()))})")
+    keep = np.isin(pre, list(cset)) & np.isin(post, list(cset))
+    id2i = {nid: i for i, nid in enumerate(chosen)}
+    i_arr = np.array([id2i[a] for a in pre[keep]], dtype=np.int64)
+    j_arr = np.array([id2i[b] for b in post[keep]], dtype=np.int64)
+    return chosen, i_arr, j_arr, keep
+
+
+def build_network(n_neurons, i_arr, j_arr, w_syn, timed=False, delays=None):
     """Fresh deterministic Brian2 LIF network over the neuron set.
 
     If timed=True the per-neuron input current is a 2D TimedArray
@@ -63,42 +92,76 @@ def build_network(n_neurons, i_arr, j_arr, w_syn, timed=False):
     S = Synapses(G, G, model="weight : 1", on_pre="Isyn += weight*amp")
     S.connect(i=i_arr, j=j_arr)
     S.weight = w_syn
+    if delays is not None:
+        S.delay = np.asarray(delays) * ms
     sm = SpikeMonitor(G)
     return G, S, sm, Rres, El
 
 
 def build_subgraph(feather, n_top_al, orn_ids):
     """Top-K AL presynaptic neurons + all ORNs; returns edge arrays."""
-    t = ft.read_table(feather)
-    pre = t.column("pre_pt_root_id").to_numpy()
-    post = t.column("post_pt_root_id").to_numpy()
-    npl = t.column("neuropil").to_pylist()
-    syn_c = t.column("syn_count").to_numpy().astype(np.float64)
-    gaba = t.column("gaba_avg").to_numpy()
-    glut = t.column("glut_avg").to_numpy()
-
-    in_al = np.array([isinstance(x, str) and x.startswith("AL") for x in npl])
-    pre_a = pre[in_al]
-    uniq, counts = np.unique(pre_a, return_counts=True)
-    top = uniq[np.argsort(-counts)[: n_top_al]]
-    chosen = np.unique(np.concatenate([top, orn_ids]))
-    cset = set(chosen.tolist())
-    print(f"chosen neurons: {len(chosen)} "
-          f"(ORNs among them: {len(cset & set(orn_ids.tolist()))})")
-
-    keep = np.isin(pre, list(cset)) & np.isin(post, list(cset))
-    pre_k, post_k = pre[keep], post[keep]
-    id2i = {nid: i for i, nid in enumerate(chosen)}
-    i_arr = np.array([id2i[a] for a in pre_k], dtype=np.int64)
-    j_arr = np.array([id2i[b] for b in post_k], dtype=np.int64)
+    pre, post, npl, syn_c, tx = _read_edges(feather)
+    chosen, i_arr, j_arr, keep = _select_subgraph(pre, post, npl, orn_ids,
+                                                  n_top_al)
     syn_k = syn_c[keep]
-    inhibitory = gaba[keep] > glut[keep]
+    gaba = tx["gaba"][keep]
+    glut = tx["glut"][keep]
+
+    inhibitory = gaba > glut
     w_syn = np.where(inhibitory, -1.0, 1.0) * np.maximum(0.1, syn_k)
     print(f"synapses in subgraph: {len(i_arr)} "
           f"(E: {int((~inhibitory).sum())}, I: {int(inhibitory.sum())})")
     orn_set = set(orn_ids.tolist())
     is_orn = np.array([n in orn_set for n in chosen], dtype=bool)
     return chosen, i_arr, j_arr, w_syn, is_orn
+
+
+def build_subgraph_real(feather, n_top_al, orn_ids, syn_mode="cont",
+                        delay_mean_ms=0.0, delay_std_ms=0.5, seed=0):
+    """Subgraph with more realistic synapses.
+
+    syn_mode='cont': per-edge weight uses the full transmitter profile,
+    w = syn_count * clip(ach + glut - gaba, -1, 1)  (modulatory oct/ser/da
+    are not fast-synaptic and are ignored). Edges dominated by ach/glut are
+    excitatory, gaba inhibitory; mixed edges scale down.
+    delay_mean_ms>0: per-edge axonal+synaptic delays ~ N(mean, std), clipped
+    to >=0.2 ms (tract lengths are NOT in the connectome, so this is a
+    statistical approximation).
+    Returns (chosen, i_arr, j_arr, w_syn, is_orn, delays_or_None).
+    """
+    pre, post, npl, syn_c, tx = _read_edges(feather)
+    chosen, i_arr, j_arr, keep = _select_subgraph(pre, post, npl, orn_ids,
+                                                  n_top_al)
+    syn_k = syn_c[keep]
+    a_k, g_k, l_k = (tx["ach"][keep], tx["gaba"][keep], tx["glut"][keep])
+
+    if syn_mode == "cont":
+        frac = np.clip(a_k + l_k - g_k, -1.0, 1.0)
+        w_syn = syn_k * frac
+        e_frac = float((frac > 0.05).mean())
+        print(f"transmitter-continuous weights: |frac| p50="
+              f"{np.abs(frac).mean():.2f} E-edges={e_frac:.0%}")
+    elif syn_mode == "sign":
+        inhibitory = g_k > (a_k + l_k)
+        w_syn = np.where(inhibitory, -1.0, 1.0) * np.maximum(0.1, syn_k)
+        print(f"sign weights (ach-aware): "
+              f"E={len(i_arr)-int(inhibitory.sum())} I={int(inhibitory.sum())}")
+    else:
+        raise ValueError(f"unknown syn_mode '{syn_mode}'")
+
+    delays = None
+    if delay_mean_ms > 0:
+        rng = np.random.default_rng(seed)
+        delays = np.maximum(
+            rng.normal(delay_mean_ms,
+                       max(delay_std_ms, 1e-6), len(i_arr)), 0.2)
+        print(f"delays: N({delay_mean_ms},{delay_std_ms})ms "
+              f"p50={np.percentile(delays, 50):.2f} "
+              f"p95={np.percentile(delays, 95):.2f}")
+
+    orn_set = set(orn_ids.tolist())
+    is_orn = np.array([n in orn_set for n in chosen], dtype=bool)
+    return chosen, i_arr, j_arr, w_syn, is_orn, delays
 
 
 WEIGHT_TRANSFORMS = ("baseline", "binary", "sqrt", "log1p", "cap99", "indeg")

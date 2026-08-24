@@ -39,8 +39,10 @@ roadmap (odor -> brain -> decoder -> LLM).
   `decoder/baseline.json`), `decoder_ablation.py` (ORN/non-ORN/all,
   `decoder/ablation.json`), `decoder_open.py` (MLP closed + brain→embedding
   regression for unseen odors, `decoder/open.json`). scikit-learn is installed.
-  NOTE: `decoder/dataset.npz` is currently generated at gain=40 (stronger drive;
-  min odor-state corr 0.78 vs 0.92 at gain=5) for better separability.
+  NOTE: `decoder/dataset.npz` is generated at gain=40 (stronger drive;
+  min odor-state corr 0.78 vs 0.92 at gain=5) for better separability, and
+  since stage 4.11 with per-edge delays N(1.5, 0.5) ms (biggest held-out win;
+  see PLAN.md 4.11).
   ORN drive time course is selectable via `--pulse tonic|bump|adapt` (timed
   TimedArray in run_odors.build_network; default tonic). Pulse drive was tried
   for stage 4.8 and did NOT improve held-out — see PLAN.md.
@@ -67,6 +69,14 @@ roadmap (odor -> brain -> decoder -> LLM).
   NEGATIVE result — LIF F-I compresses weak responses near rheobase, held-out
   hit@1 drops to 0. Canonical stays `--drive-map linear` (gain=40). Dataset in
   `decoder_fi/`.
+- Realistic synapses (stage 4.11): `--syn-mode cont` (w=syn_count*clip(ach+
+  glut-gaba,-1,1), ach-aware; alone NEGATIVE) and `--delay-mean-ms M
+  --delay-std-ms S` (per-edge delays ~N(M,S); POSITIVE — best lever so far:
+  held-out mean_rank 10->5.6, hit@1 0.29 at N(1.5,0.5), robust at N(2.5,1)).
+  Datasets: `decoder_tx/`, `decoder_del/`, `decoder_txdel/`, `decoder_del25/`.
+  Canonical `decoder/` now INCLUDES delays N(1.5, 0.5) ms (switched after the
+  positive result); numbers in PLAN.md 4.2-4.10 refer to the older no-delay
+  canonical.
 
 ## Hard constraints (do not break)
 

@@ -20,4 +20,8 @@ decoder/
 decoder_big/
 decoder_w/
 decoder_fi/
+decoder_tx/
+decoder_del/
+decoder_txdel/
+decoder_del25/
 results_weights/

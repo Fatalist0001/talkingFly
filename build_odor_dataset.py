@@ -30,7 +30,7 @@ from brian2 import *
 
 import prepare_olfaction as op
 from run_odors import (WEIGHT_TRANSFORMS, build_network, build_subgraph,
-                       weight_transform)
+                       build_subgraph_real, weight_transform)
 
 
 # ---- worker globals (set once per subprocess) ------------------------------
@@ -40,12 +40,13 @@ _IS_ORN = None
 _I_ARR = None
 _J_ARR = None
 _W_SYN = None
+_DELAYS = None
 
 
-def _init_worker(args, N, is_orn, i_arr, j_arr, w_syn):
-    global _ARGS, _N, _IS_ORN, _I_ARR, _J_ARR, _W_SYN
+def _init_worker(args, N, is_orn, i_arr, j_arr, w_syn, delays=None):
+    global _ARGS, _N, _IS_ORN, _I_ARR, _J_ARR, _W_SYN, _DELAYS
     _ARGS, _N, _IS_ORN = args, N, is_orn
-    _I_ARR, _J_ARR, _W_SYN = i_arr, j_arr, w_syn
+    _I_ARR, _J_ARR, _W_SYN, _DELAYS = i_arr, j_arr, w_syn, delays
 
 
 def _chunkify(specs, n):
@@ -88,14 +89,16 @@ def _run_chunk(specs):
     out = []
     for (label, kind, oi, drive_amp) in specs:
         counts, bins, traj = simulate_trial(
-            drive_amp, _ARGS, _N, _IS_ORN, _I_ARR, _J_ARR, _W_SYN)
+            drive_amp, _ARGS, _N, _IS_ORN, _I_ARR, _J_ARR, _W_SYN, _DELAYS)
         out.append((counts, bins, traj, label, kind, oi))
     return out
 
 
-def simulate_trial(drive_amp, args, N, is_orn, i_arr, j_arr, w_syn):
+def simulate_trial(drive_amp, args, N, is_orn, i_arr, j_arr, w_syn,
+                   delays=None):
     """Simulate one trial. drive_amp: (N,) pulse amplitude per ORN (pA), 0 else."""
-    G, S, sm, Rres, El = build_network(N, i_arr, j_arr, w_syn, timed=True)
+    G, S, sm, Rres, El = build_network(N, i_arr, j_arr, w_syn, timed=True,
+                                       delays=delays)
     G.v = El + args.base * pA * Rres
 
     n_steps = int(round(args.simtime / DT_MS))
@@ -196,6 +199,14 @@ def main():
                    help="fi map: spontaneous ORN firing rate")
     p.add_argument("--max-hz", type=float, default=250.0,
                    help="fi map: max odor-evoked ORN rate at resp=1")
+    p.add_argument("--syn-mode", default="sign", choices=["sign", "cont"],
+                   help="sign: gaba-vs-(ach+glut) hard sign (legacy uses "
+                        "gaba vs glut only); cont: w=syn_count*clip(ach+"
+                        "glut-gaba,-1,1) continuous transmitter profile")
+    p.add_argument("--delay-mean-ms", type=float, default=0.0,
+                   help=">0 adds per-edge delays ~ N(mean,std), min 0.2 ms")
+    p.add_argument("--delay-std-ms", type=float, default=0.5,
+                   help="std of the per-edge delay distribution")
     p.add_argument("--drive-sigma", type=float, default=0.15,
                    help="relative trial-to-trial jitter of ORN drive")
     p.add_argument("--odors", default=None, help="comma-separated names")
@@ -221,8 +232,16 @@ def main():
         odor_idx = select_odors(matrix, names, args.n_odors, args.seed)
         print(f"sampled {len(odor_idx)} diverse odors (seed={args.seed})")
 
-    chosen, i_arr, j_arr, w_syn, is_orn = build_subgraph(
-        args.feather, args.neurons, orn_ids)
+    delays = None
+    if args.syn_mode == "cont" or args.delay_mean_ms > 0:
+        chosen, i_arr, j_arr, w_syn, is_orn, delays = build_subgraph_real(
+            args.feather, args.neurons, orn_ids,
+            syn_mode="cont" if args.syn_mode == "cont" else "sign",
+            delay_mean_ms=args.delay_mean_ms,
+            delay_std_ms=args.delay_std_ms, seed=args.seed)
+    else:
+        chosen, i_arr, j_arr, w_syn, is_orn = build_subgraph(
+            args.feather, args.neurons, orn_ids)
     w_syn = weight_transform(w_syn, i_arr, j_arr, len(chosen),
                              args.weight_transform)
     N = len(chosen)
@@ -279,11 +298,12 @@ def main():
         with ProcessPoolExecutor(
                 max_workers=n_workers,
                 initializer=_init_worker,
-                initargs=(args, N, is_orn, i_arr, j_arr, w_syn)) as ex:
+                initargs=(args, N, is_orn, i_arr, j_arr, w_syn,
+                          delays)) as ex:
             chunks = _chunkify(trials_spec, n_workers)
             results = list(ex.map(_run_chunk, chunks))
     else:
-        _init_worker(args, N, is_orn, i_arr, j_arr, w_syn)
+        _init_worker(args, N, is_orn, i_arr, j_arr, w_syn, delays)
         results = [_run_chunk(trials_spec)]
     print(f"built {n_total}/{n_total} trials in "
           f"{time.perf_counter() - t_begin:.1f}s "
@@ -325,6 +345,9 @@ def main():
         "drive_map": args.drive_map,
         "spont_hz": args.spont_hz, "max_hz": args.max_hz,
         "weight_transform": args.weight_transform,
+        "syn_mode": args.syn_mode,
+        "delay_mean_ms": args.delay_mean_ms,
+        "delay_std_ms": args.delay_std_ms,
         "simtime_ms": args.simtime, "stim_start_ms": args.stim_start,
         "stim_dur_ms": args.stim_dur, "glom_names": types,
         "workers": n_workers,
