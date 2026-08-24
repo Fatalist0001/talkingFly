@@ -77,6 +77,20 @@ roadmap (odor -> brain -> decoder -> LLM).
   Canonical `decoder/` now INCLUDES delays N(1.5, 0.5) ms (switched after the
   positive result); numbers in PLAN.md 4.2-4.10 refer to the older no-delay
   canonical.
+- Fly speaks (stage 5): `.\.venv\Scripts\python.exe stage5_fly_speaks.py`
+  (`--odor NAME | --blank | --seed N | --dataset-trial | --no-llm | --list |
+  --shutdown | --keep-server`)
+  — one fresh trial through the canonical network (same recipe/delays as the
+  dataset; neurons re-aligned to saved root_ids) -> closed-set logreg on
+  X_glom_bins trained on the whole canonical set + silence detector ->
+  two-step semantic bridge (LLM turns chemical name into an everyday smell,
+  then a fly persona reacts) -> local gemma-E2B via llama.cpp server.
+  Server auto-starts on port 8765 if /health (GET!) is not ok; model and
+  llama-server paths are hardcoded at the top of the script. Lifecycle: a
+  server spawned by the script is killed at the end of the run
+  (`--keep-server` to leave it up); `--shutdown` kills any server on that
+  port and exits. Thinking mode of gemma must stay disabled
+  (`enable_thinking: false`), else answers land in `reasoning_content`.
 
 ## Hard constraints (do not break)
 
